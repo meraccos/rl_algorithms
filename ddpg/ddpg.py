@@ -7,7 +7,7 @@ from model import Actor, Critic, ReplayBuffer, OUNoise
 
 class DDPG:
     def __init__(self, env, lr, batch_size, gamma, max_episodes, 
-                 eval_freq_ep, n_eval_episodes, updt_freq_st, training_starts=None):
+                 eval_freq_ep, n_eval_episodes):
         self.env = env
         self.actor = Actor(env)     # Optimized network
         self.actor_ = Actor(env)    # Target network
@@ -24,11 +24,10 @@ class DDPG:
         self.noise = OUNoise(env.action_space)
         self.max_episodes = max_episodes
         self.eval_freq_ep = eval_freq_ep
-        self.updt_freq_st = updt_freq_st
         self.n_eval_episodes = n_eval_episodes
-        self.training_starts = training_starts or 10 * batch_size
+        self.learning_starts = 10 * batch_size
         self.step = 0
-        
+
     def optimize_critic(self):
         self.optimizer_critic.zero_grad()
         s, a, r, s_, d = self.rb.sample()
@@ -42,7 +41,7 @@ class DDPG:
         self.clamp_gradient(self.critic)
         self.optimizer_critic.step()
         self.writer.add_scalar('Train/critic_loss', loss, self.step)
-        
+
     def optimize_actor(self):
         self.optimizer_actor.zero_grad()
         s, _, _, _, _ = self.rb.sample()
@@ -58,7 +57,7 @@ class DDPG:
         for target_param, source_param in zip(target.parameters(), source.parameters()):
             target_param.data.copy_(tau * source_param.data + 
                                     (1.0 - tau) * target_param.data)
-    
+
     def clamp_gradient(self, model):
         for param in model.parameters():
             param.grad.data.clamp_(-1, 1)    
@@ -67,7 +66,7 @@ class DDPG:
         self.noise.reset()
         obs, _ = self.env.reset()
         done = False
-        
+
         ep_len = 0
         ep_rew = 0.0
         while not done:
@@ -84,8 +83,7 @@ class DDPG:
                 self.rb.store(obs, action, reward, obs_, terminated)
                 self.step += 1
                 
-                train_starts = self.step >= self.training_starts
-                if self.step % self.updt_freq_st == 0 and train_starts:
+                if self.step >= self.learning_starts:
                     self.actor.train()
                     self.critic.train()
                     self.optimize_critic()

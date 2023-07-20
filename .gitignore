@@ -1,3 +1,7 @@
 .DS_Store
 runs
 __pycache__
+test.ipynb
+cliptest.ipynb
+playground.ipynb
+.gitignore
