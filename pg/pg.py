@@ -1,3 +1,7 @@
+"""
+Simple vanilla policy gradient implementation.
+Advantage fn is the sum of future rewards.
+"""
 import torch 
 import torch.nn as nn
 import torch.nn.functional as F
