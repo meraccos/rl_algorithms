@@ -6,4 +6,4 @@ Still under development. Currently available algorithms:
 * Policy Gradient with value baseline
 * Deep Q Network (DQN)
 * Deep Deterministic Policy Gradient (DDPG)
-* Soft Actor Critic (SAC) (Not working yet)
+* Soft Actor Critic (SAC) **(Not working yet)**
