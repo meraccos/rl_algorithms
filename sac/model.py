@@ -2,6 +2,55 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions.normal import Normal
+import torch.distributions as pyd
+import math
+
+
+class TanhTransform(pyd.transforms.Transform):
+    domain = pyd.constraints.real
+    codomain = pyd.constraints.interval(-1.0, 1.0)
+    bijective = True
+    sign = +1
+
+    def __init__(self, cache_size=1):
+        super().__init__(cache_size=cache_size)
+
+    @staticmethod
+    def atanh(x):
+        return 0.5 * (x.log1p() - (-x).log1p())
+
+    def __eq__(self, other):
+        return isinstance(other, TanhTransform)
+
+    def _call(self, x):
+        return x.tanh()
+
+    def _inverse(self, y):
+        # We do not clamp to the boundary here as it may degrade the performance of certain algorithms.
+        # one should use `cache_size=1` instead
+        return self.atanh(y)
+
+    def log_abs_det_jacobian(self, x, y):
+        # We use a formula that is more numerically stable, see details in the following link
+        # https://github.com/tensorflow/probability/commit/ef6bb176e0ebd1cf6e25c6b5cecdd2428c22963f#diff-e120f70e92e6741bca649f04fcd907b7
+        return 2. * (math.log(2.) - x - F.softplus(-2. * x))
+
+class SquashedNormal(pyd.transformed_distribution.TransformedDistribution):
+    def __init__(self, loc, scale):
+        self.loc = loc
+        self.scale = scale
+
+        self.base_dist = pyd.Normal(loc, scale)
+        transforms = [TanhTransform()]
+        super().__init__(self.base_dist, transforms)
+
+    @property
+    def mean(self):
+        mu = self.loc
+        for tr in self.transforms:
+            mu = tr(mu)
+        return mu
+
 
 
 def weights_init_(m):
@@ -10,33 +59,35 @@ def weights_init_(m):
         torch.nn.init.constant_(m.bias, 0)
         
         
+
+
 class Actor(nn.Module):
     def __init__(self, env=None):
         super().__init__()
         self.input_dim = env.observation_space.shape[0]             
         self.output_dim = env.action_space.shape[0]
         
-        self.l1 = nn.Linear(self.input_dim, 400)
-        self.l2 = nn.Linear(400, 300)
-        
-        self.mu = nn.Linear(300, self.output_dim)
-        self.std = nn.Linear(300, self.output_dim)
-        
+        self.l1 = nn.Linear(self.input_dim, 256)
+        self.l2 = nn.Linear(256, 256)
+        self.l3 = nn.Linear(256, self.output_dim * 2)
+                
         self.apply(weights_init_)
 
     def forward(self, x):
         a = F.relu(self.l1(x))
         a = F.relu(self.l2(a))
         
-        mu = self.mu(a)
-        log_std = torch.clamp(self.std(a), -20, 2)
+        mu, log_std = self.l3(a).chunk(2, dim=-1)
+        log_std = torch.tanh(log_std)
         return mu, log_std
 
     def sample(self, obs, test=False):
         mu, log_std = self(obs)
         if test:
             return torch.tanh(mu), 0
-        n = Normal(mu, log_std.exp())
+        # n = Normal(mu, log_std.exp())
+        n = SquashedNormal(mu, log_std.exp())
+        
         action = n.rsample().tanh()
         log_prob = (n.log_prob(action) - torch.log(1 - action.pow(2) + 1e-6)).sum(1)
         return action, log_prob
@@ -49,9 +100,9 @@ class Critic(nn.Module):
         self.action_dim = env.action_space.shape[0]
         input_dim = self.obs_dim + self.action_dim
 
-        self.l1 = nn.Linear(input_dim , 400)
-        self.l2 = nn.Linear(400, 300)
-        self.l3 = nn.Linear(300, 1)
+        self.l1 = nn.Linear(input_dim , 256)
+        self.l2 = nn.Linear(256, 256)
+        self.l3 = nn.Linear(256, 1)
         
         self.apply(weights_init_)
 
