@@ -1,8 +1,9 @@
 import torch
 import torch.nn.functional as F
-import gym
-from gym.wrappers import TransformObservation
+import gymnasium as gym
+from gymnasium.wrappers import TransformObservation
 from tqdm import tqdm
+import math
 from model import ReplayBuffer, Actor, Critic
 from torch.nn.utils import clip_grad_norm_
 from torch.utils.tensorboard import SummaryWriter
@@ -15,17 +16,23 @@ class SAC:
         
         # Hyperparameters
         self.gamma = 0.99
-        self.temp = 0.01
+        self.lr_actor = 3e-4
+        self.lr_critic = 3e-4
         self.eval_freq = 20
         self.num_eval_ep = 20
         self.start_steps = 5000
         self.clip_value = 2.5
         self.tau = 0.0001
-    
+        self.learn_temp = True
+        self.init_temp = torch.tensor(1.0)
+            
         self.env = self.setup_environment()
-        self.actor, self.critics, self.optimizers = self.setup_models()
         self.replay_buffer = self.initialize_replay_buffer()
+        self.log_freq = 10
         self.global_step = 0
+        self.episode = 0
+
+        self.setup_models()
 
     def setup_environment(self):
         env = gym.make('LunarLanderContinuous-v2', render_mode="rgb_array")
@@ -35,19 +42,27 @@ class SAC:
         return TransformObservation(env, lambda obs: obs * obs_a - obs_b)
 
     def setup_models(self):
-        actor = Actor(self.env).to(self.device)
-        Q1 = Critic(self.env).to(self.device)
-        Q2 = Critic(self.env).to(self.device)
-        Q1_ = Critic(self.env).to(self.device)
-        Q2_ = Critic(self.env).to(self.device)
-        Q1_.load_state_dict(Q1.state_dict())
-        Q2_.load_state_dict(Q2.state_dict())
+        self.actor = Actor(self.env).to(self.device)
+        self.Q1 = Critic(self.env).to(self.device)
+        self.Q2 = Critic(self.env).to(self.device)
+        self.Q1_ = Critic(self.env).to(self.device)
+        self.Q2_ = Critic(self.env).to(self.device)
+        self.Q1_.load_state_dict(self.Q1.state_dict())
+        self.Q2_.load_state_dict(self.Q2.state_dict())
         
-        optim_a = torch.optim.Adam(actor.parameters(), lr=3e-4)
-        optim_q1 = torch.optim.Adam(Q1.parameters(), lr=3e-4)
-        optim_q2 = torch.optim.Adam(Q2.parameters(), lr=3e-4)
+        self.optim_a = torch.optim.Adam(self.actor.parameters(), lr=self.lr_actor)
+        self.optim_q1 = torch.optim.Adam(self.Q1.parameters(), lr=self.lr_critic)
+        self.optim_q2 = torch.optim.Adam(self.Q2.parameters(), lr=self.lr_critic)
         
-        return actor, (Q1, Q2, Q1_, Q2_), (optim_a, optim_q1, optim_q2)
+        if self.learn_temp:
+            self.temp_logit = self.init_temp
+            self.temp_logit.requires_grad = True 
+            self.temp = self.init_temp
+            
+            self.target_temp = self.env.action_space.shape[0]
+            self.optim_temp = torch.optim.Adam([self.temp_logit])
+        else:
+            self.temp = self.init_temp            
     
     def initialize_replay_buffer(self):
         state_dim = self.env.observation_space.shape[0]
@@ -74,7 +89,6 @@ class SAC:
         obs, _ = self.env.reset()
         done = False
         rews_ep = []
-
         step = 0
         
         # Play the game and collect data
@@ -97,13 +111,12 @@ class SAC:
             
             if not test:
                 self.global_step += 1
-                self.optimize(self.global_step)
+                self.optimize()
         return rews_ep, step
 
-
-    def optimize(self, episode):
+    def optimize(self):
         s, a, r, s_, d = self.replay_buffer.sample()
-        
+            
         # Optimize the critics
         a_theta, log_prob = self.actor.sample(s_)
         q = torch.min(self.Q1_(s_, a_theta), self.Q2_(s_, a_theta)).to(self.device) 
@@ -135,17 +148,32 @@ class SAC:
         clip_grad_norm_(self.actor.parameters(), self.clip_value)
         self.optim_a.step()
         
-        self.writer.add_scalar("Loss/Critic", loss_q1.cpu().detach(), episode)
-        self.writer.add_scalar("Loss/Actor", loss_a.cpu().detach(), episode)
-        self.writer.add_scalar("Loss/entropy", -self.temp * log_prob.mean(), episode)
+        # Optimize the temp
+        if self.learn_temp:
+            log_prob = self.actor.sample(s)[0].detach()
+            self.temp = torch.exp(self.temp_logit)
+            loss_t = self.temp_logit * (log_prob.mean() - self.target_temp) + self.temp
+                        
+            self.optim_temp.zero_grad()
+            loss_t.backward()
+            self.optim_temp.step()
+             
+            self.temp = self.temp.detach()
+            
+        self.soft_update()
         
-        self.soft_update(self.Q1_, self.Q1, tau=self.tau)
-        self.soft_update(self.Q2_, self.Q2, tau=self.tau)
-
+        if self.global_step % self.log_freq == 0:
+            self.writer.add_scalar("Loss/Critic", loss_q1.cpu().detach(), self.global_step)
+            self.writer.add_scalar("Loss/Actor", loss_a.cpu().detach(), self.global_step)
+            self.writer.add_scalar("Loss/Entropy", -log_prob.mean(), self.global_step)
+            self.writer.add_scalar("Loss/Temperature_loss", loss_t, self.global_step)
+            self.writer.add_scalar("Loss/Temperature", self.temp, self.global_step)
+        
     def train(self, num_episodes):
         self.fill_replay_buffer()
         for episode in tqdm(range(num_episodes)):   
             _, step = self.run_episode()
+            self.episode += 1
             
             if episode % self.eval_freq == 0:
                 self.evaluate()
@@ -161,7 +189,7 @@ class SAC:
         avg_step = sum(eval_steps) / len(eval_steps)
             
         self.writer.add_scalar("Eval/reward", avg_reward, self.global_step)
-        self.writer.add_scalar("Eval/step", avg_step, self.global_step)
+        self.writer.add_scalar("Eval/length", avg_step, self.global_step)
             
             
 if __name__ == "__main__":
