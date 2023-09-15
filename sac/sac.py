@@ -174,7 +174,7 @@ class SAC:
         if self.learn_temp:
             log_prob = self.actor.sample(s)[0].detach()
             self.temp = torch.exp(self.temp_logit)
-            loss_t = self.temp_logit * (log_prob.mean() - self.target_temp) + self.temp
+            loss_t = self.temp_logit * (log_prob.mean() + self.target_temp) + self.temp         # FIXXXXXX
                         
             self.optim_temp.zero_grad()
             loss_t.backward()

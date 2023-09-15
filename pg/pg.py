@@ -10,8 +10,6 @@ from tqdm import tqdm
 from model import Policy
 
 env = gym.make("FrozenLake-v1", is_slippery=False)
-# env = gym.make("Taxi-v3")
-# env = gym.make("CliffWalking-v0")
 
 policy = Policy(env)
 optimizer = torch.optim.Adam(policy.parameters())
