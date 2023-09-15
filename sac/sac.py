@@ -3,7 +3,6 @@ import torch.nn.functional as F
 import gymnasium as gym
 from gymnasium.wrappers import TransformObservation
 from tqdm import tqdm
-import math
 from model import ReplayBuffer, Actor, Critic
 from torch.nn.utils import clip_grad_norm_
 from torch.utils.tensorboard import SummaryWriter
@@ -16,19 +15,22 @@ class SAC:
         
         # Hyperparameters
         self.gamma = 0.99
-        self.lr_actor = 3e-4
+        self.lr_actor = 2e-4
         self.lr_critic = 3e-4
         self.eval_freq = 20
         self.num_eval_ep = 20
-        self.start_steps = 5000
+        self.start_steps = 10000
         self.clip_value = 2.5
-        self.tau = 0.0001
-        self.learn_temp = True
-        self.init_temp = torch.tensor(1.0)
+        self.tau = 0.01
+        self.learn_temp = False
+        self.init_temp = torch.tensor(0.02)
             
         self.env = self.setup_environment()
+        self.rb_size = 1000000
+        self.batch_size = 256
         self.replay_buffer = self.initialize_replay_buffer()
         self.log_freq = 10
+        self.save_freq = 200000
         self.global_step = 0
         self.episode = 0
 
@@ -68,7 +70,8 @@ class SAC:
         state_dim = self.env.observation_space.shape[0]
         action_dim = self.env.action_space.shape[0]
         return ReplayBuffer(state_dim=state_dim, action_dim=action_dim, 
-                            length=1000000, batch_size=512, device=self.device)
+                            length=self.rb_size, batch_size=self.batch_size, 
+                            device=self.device)
 
     def fill_replay_buffer(self):
         current_buffer_size = 0
@@ -84,6 +87,22 @@ class SAC:
         for target_p, source_p in zip(self.Q2_.parameters(), self.Q2.parameters()):
             target_p.data.copy_(self.tau * source_p.data + 
                                 (1.0 - self.tau) * target_p.data)
+    
+    def save(self):
+        file_name = f'models/{self.global_step // self.save_freq}'
+        torch.save(self.actor.state_dict(), file_name +'_a.pt')
+        torch.save(self.Q1.state_dict(), file_name +'_q1.pt')
+        torch.save(self.Q2.state_dict(), file_name +'_q2.pt')
+        torch.save(self.Q1_.state_dict(), file_name +'_q1_.pt')
+        torch.save(self.Q2_.state_dict(), file_name +'_q2_.pt')
+    
+    def load(self, idx):
+        file_name = f'models/{idx}'
+        self.actor.load_state_dict(torch.load(file_name +'_a.pt'))
+        self.Q1.load_state_dict(torch.load(file_name +'_q1.pt'))
+        self.Q2.load_state_dict(torch.load(file_name +'_q2.pt'))
+        self.Q1_.load_state_dict(torch.load(file_name +'_q1_.pt'))
+        self.Q2_.load_state_dict(torch.load(file_name +'_q2_.pt'))
 
     def run_episode(self, test=False, random=False):
         obs, _ = self.env.reset()
@@ -112,6 +131,9 @@ class SAC:
             if not test:
                 self.global_step += 1
                 self.optimize()
+
+            if self.global_step % self.save_freq == 0:
+                self.save()
         return rews_ep, step
 
     def optimize(self):
@@ -159,6 +181,8 @@ class SAC:
             self.optim_temp.step()
              
             self.temp = self.temp.detach()
+            self.writer.add_scalar("Loss/Temperature_loss", loss_t, self.global_step)
+
             
         self.soft_update()
         
@@ -166,7 +190,6 @@ class SAC:
             self.writer.add_scalar("Loss/Critic", loss_q1.cpu().detach(), self.global_step)
             self.writer.add_scalar("Loss/Actor", loss_a.cpu().detach(), self.global_step)
             self.writer.add_scalar("Loss/Entropy", -log_prob.mean(), self.global_step)
-            self.writer.add_scalar("Loss/Temperature_loss", loss_t, self.global_step)
             self.writer.add_scalar("Loss/Temperature", self.temp, self.global_step)
         
     def train(self, num_episodes):
