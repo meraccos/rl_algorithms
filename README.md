@@ -7,3 +7,4 @@ Still under development. Currently available algorithms:
 * Deep Q Network (DQN)
 * Deep Deterministic Policy Gradient (DDPG)
 * Soft Actor Critic (SAC)
+* Proximal Policy Optimization (PPO) **(Work in progress)**
