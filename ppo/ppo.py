@@ -159,7 +159,7 @@ class PPO:
                 rews.append(r.sum())
                 lengths.append(r.shape[0])
                 
-            if self.step == self.buffer_size:
+            if self.step % self.buffer_size == 0:
                 s, r= self.buffer.load_state_and_rewards()
                 scaled_r = self.scale_rew(r)
                 
@@ -180,7 +180,7 @@ class PPO:
             self.optimize()
             self.buffer.reset_all()
             
-if __name__ == '__main__':
+if __name__ == "__main__":
     ppo = PPO()
     ppo.train(100000)
     
