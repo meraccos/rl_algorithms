@@ -2,8 +2,8 @@
 This repository contains PyTorch implementations of some of the mainly used Reinforcement Learning algorithms from scratch. The project focuses at implementing the algorithms in a clean and readable way.
 
 Still under development. Currently available algorithms:
-* Vanilla Policy Gradient (PG)
-* Policy Gradient with value baseline
+* Policy Gradient, no baseline (PG)
+* Policy Gradient, value baseline (PG)
 * Deep Q Network (DQN)
 * Deep Deterministic Policy Gradient (DDPG)
 * Soft Actor Critic (SAC)
