@@ -56,7 +56,8 @@ class SquashedNormal(pyd.transformed_distribution.TransformedDistribution):
 def initialize_weights(model):
     for m in model.modules():
         if isinstance(m, nn.Linear):
-            nn.init.xavier_uniform_(m.weight)
+            nn.init.orthogonal_(m.weight)
+            # nn.init.xavier_uniform_(m.weight)
             # nn.init.kaiming_uniform_(m.weight, nonlinearity='relu')
             if m.bias is not None:
                 nn.init.constant_(m.bias, 0)
@@ -75,8 +76,10 @@ class Actor(nn.Module):
         initialize_weights(self)
 
     def forward(self, x):
-        a = F.leaky_relu(self.l1(x), 0.1)
-        a = F.leaky_relu((self.l2(a)), 0.1)
+        # a = F.leaky_relu(self.l1(x), 0.1)
+        # a = F.leaky_relu((self.l2(a)), 0.1)
+        a = F.relu(self.l1(x))
+        a = F.relu((self.l2(a)))
         mu, std = self.l3(a).chunk(2, dim=-1)
         std = torch.sigmoid(std)
         std = 7.0 * std + 1e-8
@@ -116,8 +119,10 @@ class Critic(nn.Module):
         initialize_weights(self)
 
     def forward(self, x):
-        x = F.leaky_relu((self.l1(x)), 0.1)
-        x = F.leaky_relu((self.l2(x)), 0.1)
+        # x = F.leaky_relu((self.l1(x)), 0.1)
+        # x = F.leaky_relu((self.l2(x)), 0.1)
+        x = F.relu((self.l1(x)))
+        x = F.relu((self.l2(x)))
         x = self.l3(x)
         return x.squeeze()
 
@@ -243,6 +248,19 @@ class Buffer:
         self.all_returns = torch.empty((0, 1), device=self.device, dtype=self.dtype)
 
 
+class RunningStatistics:
+    def __init__(self, shape):
+        self.n = 0
+        self.running_mean = np.zeros(shape)
+        self.running_var = np.ones(shape)
+
+    def update(self, new_data):
+        for data in new_data:
+            self.n += 1
+            new_mean = self.running_mean + (data - self.running_mean) / self.n
+            self.running_var += (data - self.running_mean) * (data -  new_mean) / self.n
+            self.running_mean = new_mean            
+        return self.running_mean, np.sqrt(self.running_var)
 
 # class Buffer:
 #     def __init__(self, device='cuda'):

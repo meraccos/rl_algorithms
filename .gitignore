@@ -9,3 +9,5 @@ test_pg.ipynb
 sac/idk.ipynb
 sac/sac.ipynb
 models/
+ppo/ppo_og.py
+ppo/ppo_og2.py

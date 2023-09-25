@@ -4,6 +4,9 @@ from torch.utils.tensorboard import SummaryWriter
 
 import gymnasium as gym
 from gymnasium.wrappers import TransformObservation
+from gymnasium.wrappers import NormalizeObservation
+from gymnasium.wrappers import NormalizeReward
+from gymnasium.experimental.wrappers import RecordEpisodeStatisticsV0
 
 from tqdm import tqdm
 import numpy as np
@@ -21,16 +24,14 @@ class PPO:
         self.lam = 0.97
         self.temp = 0.02
         self.eps_clip = 0.1
-        self.buffer_size = 2048
-        self.mini_batch = 256
+        self.buffer_size = 4096
+        self.mini_batch = 128
         batches_in_buffer = self.buffer_size // self.mini_batch
-        self.num_epoch = batches_in_buffer * 10
+        self.num_epoch = batches_in_buffer * 8
         self.step = 0
         self.actor_lr = 1e-4
         self.critic_lr = 1e-3
         self.get_models()
-
-        self.running_reward_std = 1.0
         
     def get_env(self):
         env = gym.make("LunarLanderContinuous-v2")       
@@ -38,6 +39,10 @@ class PPO:
         obs_a = 2 / (obs_high - obs_low)
         obs_b = (obs_high + obs_low) / (obs_high - obs_low)
         env = TransformObservation(env, lambda obs: obs * obs_a - obs_b)
+        env = NormalizeObservation(env)
+        env = RecordEpisodeStatisticsV0(env)
+        env = NormalizeReward(env)
+
         return env
     
     def get_models(self):
@@ -52,7 +57,6 @@ class PPO:
     @torch.no_grad()
     def compute_gae(self, rewards, values, terminal_value=0.0):
         values = torch.cat([values, torch.tensor([terminal_value], device=self.device)])
-        # Calculate the temporal differences
         deltas = rewards + self.gamma * values[1:] - values[:-1]
 
         # Compute GAE advantages
@@ -65,34 +69,20 @@ class PPO:
         returns = advantages + values[:-1]
         # returns = self.buffer.discounted_rewards(rewards, self.gamma)
         return advantages, returns
-
-    def update_running_reward_std(self, new_rewards):
-        # Welford's algorithm
-        n = len(new_rewards)
-        if n == 0:
-            return
-        new_mean = new_rewards.mean()
-        new_std = new_rewards.std()
-        self.running_reward_std = np.sqrt(((self.running_reward_std ** 2) + (new_std ** 2)) / 2)
-
-    def scale_rew(self, r):
-        self.update_running_reward_std(r.cpu().numpy())
-        scaled_r = r / self.running_reward_std
-        return scaled_r
         
     def optimize(self):
         actor_losses = []
         critic_losses = []
         kl_divs = []
         for epoch in range(self.num_epoch):
-            s, a, lp, r, s_, d, advantages, returns = self.buffer.load_all(self.mini_batch, ith=epoch)
-            advantages = self.normalize(advantages)
+            s, a, lp, r, s_, d, adv, returns = self.buffer.load_all(self.mini_batch, epoch)
+            advantages = self.normalize(adv)
             
             # Actor loss
             logp = self.actor.logp(s, a)
             ratios = torch.exp(logp - lp)   
             kl_div = (logp - lp).mean().cpu().detach()
-            if abs(kl_div) > 1.0:
+            if abs(kl_div) > 0.1:
                 print('early stopping at ', epoch)
                 break
             surr1 = ratios * advantages            
@@ -121,7 +111,7 @@ class PPO:
         self.writer.add_scalar('Train/kl_div', sum(kl_divs)/self.num_epoch, self.step)
     
     def _get_action(self, obs):
-        obs = torch.tensor(obs).unsqueeze(0).to(self.device)
+        obs = torch.tensor(obs, dtype=torch.float32).unsqueeze(0).to(self.device)
         action, logp = self.actor.sample(obs)
         action = action.detach().cpu().numpy()[0]
         logp = logp.cpu().detach()
@@ -136,12 +126,12 @@ class PPO:
     @torch.no_grad()
     def collect_data(self):
         obs, _ = self.env.reset()
-        rews = []
-        lengths = []
 
         while True:
             action, logp = self._get_action(obs)
-            obs_, reward, terminated, truncated, _ = self.env.step(action)
+            obs_, reward, terminated, truncated, info = self.env.step(action)
+            obs_ = np.clip(obs_, -5.0, 5.0)
+
             done = terminated or truncated
             
             self.buffer.store(obs, action, logp, reward, obs_, done)
@@ -149,28 +139,22 @@ class PPO:
             obs = obs_
 
             if done:
-                s, r= self.buffer.load_state_and_rewards()                
-                scaled_r = self.scale_rew(r)
-                
-                self._save_advantages(s, scaled_r)           
+                s, r= self.buffer.load_state_and_rewards() 
+                self._save_advantages(s, r)           
                 self.buffer.save_ep()
                 self.buffer.reset_ep()
                 obs, _ = self.env.reset() 
-                rews.append(r.sum())
-                lengths.append(r.shape[0])
+                self.writer.add_scalar('Train/rews', info['episode']['r'], self.step)
+                self.writer.add_scalar('Train/length', info['episode']['l'], self.step) 
                 
             if self.step % self.buffer_size == 0:
-                s, r= self.buffer.load_state_and_rewards()
-                scaled_r = self.scale_rew(r)
-                
+                s, r= self.buffer.load_state_and_rewards()                
                 if s.shape[0] > 1:
-                    future_reward = self.critic(torch.tensor(obs).unsqueeze(0).to(self.device)).item()
-                    self._save_advantages(s, scaled_r, terminal_value=future_reward)
+                    future_reward = self.critic(torch.tensor(obs, dtype=torch.float32).unsqueeze(0).to(self.device)).item()
+                    self._save_advantages(s, r, terminal_value=future_reward)
                     self.buffer.save_ep()
                     
                 self.buffer.reset_ep()
-                self.writer.add_scalar('Train/rews', sum(rews) / len(rews), self.step) 
-                self.writer.add_scalar('Train/length', sum(lengths) / len(lengths), self.step) 
                 break
 
     def train(self, num_episodes=100000):
